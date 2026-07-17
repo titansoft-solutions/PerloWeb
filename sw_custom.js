@@ -1,15 +1,18 @@
 // ╔═══════════════════════════════════════════════════════════════════════╗
 // ║          PERLO — Service Worker Personalizado (sw_custom.js)          ║
-// ║  Estrategias: Network-First para API, Fallback a SW de Flutter        ║
+// ║  Network-First para Supabase API, cache de assets Flutter, offline    ║
+// ║                                                                       ║
+// ║  NOTA: NO se importa flutter_service_worker.js porque el import       ║
+// ║  síncrono bloquea el registro y causa timeout > 4s (ciclo de F5).    ║
+// ║  En su lugar, se cachean manualmente los assets críticos.             ║
 // ╚═══════════════════════════════════════════════════════════════════════╝
 
 'use strict';
 
-const CACHE_VERSION = 'perlo-v2';
+const CACHE_VERSION = 'perlo-v3';
 const STATIC_CACHE  = `${CACHE_VERSION}-static`;
 const DATA_CACHE    = `${CACHE_VERSION}-data`;
 
-// Dominios que identifican llamadas a Supabase (Network-First)
 const SUPABASE_HOSTS = [
   'supabase.co',
   'supabase.com',
@@ -19,8 +22,15 @@ const SUPABASE_HOSTS = [
 self.addEventListener('install', function (event) {
   event.waitUntil(
     caches.open(STATIC_CACHE).then(function (cache) {
-      return cache.addAll(['./offline.html']).catch(function (err) {
-        console.warn('[Perlo SW] Error precargando offline.html:', err);
+      return cache.addAll([
+        './',
+        './offline.html',
+        './manifest.json',
+        './favicon.png',
+        './icons/Icon-192.png',
+        './icons/Icon-512.png',
+      ]).catch(function (err) {
+        console.warn('[Perlo SW] Error precargando assets:', err);
       });
     }).then(function () {
       return self.skipWaiting();
@@ -49,39 +59,47 @@ self.addEventListener('activate', function (event) {
 
 // ── FETCH ─────────────────────────────────────────────────────────────────────
 self.addEventListener('fetch', function (event) {
-  const url = new URL(event.request.url);
-
-  // Ignorar requests que no son GET (POST, PUT, DELETE van siempre a red)
   if (event.request.method !== 'GET') return;
-
-  // Ignorar chrome-extension y otros esquemas no http
   if (!event.request.url.startsWith('http')) return;
 
-  // ── Estrategia A: Supabase / API → Network-First con fallback a cache ──
-  const isSupabase = SUPABASE_HOSTS.some(host => url.hostname.includes(host));
+  const url = new URL(event.request.url);
+
+  // ── Supabase / API → Network-First con fallback a cache ──
+  const isSupabase = SUPABASE_HOSTS.some(function (host) {
+    return url.hostname.includes(host);
+  });
   if (isSupabase) {
     event.respondWith(networkFirstWithCache(event.request, DATA_CACHE));
     return;
   }
 
-  // ── Estrategia B: Página offline.html ──────────
-  if (url.pathname.endsWith('offline.html')) {
+  // ── Navegación HTML → Network con fallback a cache ──
+  if (event.request.mode === 'navigate') {
     event.respondWith(
-      caches.match('./offline.html').then(function (response) {
-        return response || fetch(event.request);
+      fetch(event.request).catch(function () {
+        return caches.match('./offline.html');
       })
     );
     return;
   }
 
-  // Nota: Todas las demás peticiones (HTML, JS de Flutter, Assets, Fuentes)
-  // NO llaman a event.respondWith(), por lo que se delegan al service worker
-  // nativo de Flutter importado abajo.
+  // ── Assets estáticos (JS, CSS, imágenes, fuentes) → Cache-First ──
+  event.respondWith(
+    caches.match(event.request).then(function (cached) {
+      if (cached) return cached;
+      return fetch(event.request).then(function (response) {
+        if (response.ok && response.type === 'basic') {
+          var cloned = response.clone();
+          caches.open(STATIC_CACHE).then(function (cache) {
+            cache.put(event.request, cloned);
+          });
+        }
+        return response;
+      });
+    })
+  );
 });
 
-/**
- * Network-First con fallback a cache para datos dinámicos.
- */
 async function networkFirstWithCache(request, cacheName) {
   const cache = await caches.open(cacheName);
   try {
@@ -103,8 +121,3 @@ async function networkFirstWithCache(request, cacheName) {
     );
   }
 }
-
-// ── IMPORTAR SERVICE WORKER GENERADO POR FLUTTER ──────────────────────────────
-// Esto permite que el Service Worker nativo de Flutter gestione la caché de todos
-// los assets de la aplicación (main.dart.js, canvaskit, fuentes, etc.) sin interferir.
-importScripts('flutter_service_worker.js');
