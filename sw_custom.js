@@ -22,9 +22,10 @@ self.addEventListener('install', function (event) {
       return cache.addAll(['./offline.html']).catch(function (err) {
         console.warn('[Perlo SW] Error precargando offline.html:', err);
       });
+    }).then(function () {
+      return self.skipWaiting();
     })
   );
-  self.skipWaiting();
 });
 
 // ── ACTIVATE ─────────────────────────────────────────────────────────────────
