@@ -522,6 +522,149 @@
 
     // Exponer estado para Dart via JS interop
     window.__perloIsOnline = function() { return navigator.onLine; };
+
+    // ── 3. Lector PWA nativo con BarcodeDetector ───────────────────────────
+    // Chrome/Edge modernos pueden detectar códigos con la API nativa del
+    // navegador. Si no existe o falla, Dart recibe "fallback" y usa el lector
+    // actual de mobile_scanner/ZXing sin mostrar errores al usuario.
+    window.__perloScanBarcodeDetector = async function() {
+      const formats = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'];
+      if (!('BarcodeDetector' in window) || !navigator.mediaDevices?.getUserMedia) {
+        return { status: 'fallback' };
+      }
+
+      try {
+        if (BarcodeDetector.getSupportedFormats) {
+          const supported = await BarcodeDetector.getSupportedFormats();
+          if (!formats.some((format) => supported.includes(format))) {
+            return { status: 'fallback' };
+          }
+        }
+
+        const detector = new BarcodeDetector({ formats });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, min: 20 }
+          }
+        });
+
+        return await new Promise(async (resolve) => {
+          let stopped = false;
+          let pendingDetection = false;
+          let detectionErrors = 0;
+          let torchEnabled = false;
+
+          const overlay = document.createElement('div');
+          overlay.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483647;background:#000;overflow:hidden;';
+
+          const video = document.createElement('video');
+          video.autoplay = true;
+          video.muted = true;
+          video.playsInline = true;
+          video.srcObject = stream;
+          video.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+
+          const frame = document.createElement('div');
+          frame.style.cssText = 'position:absolute;left:5%;top:33%;width:90%;height:34%;border:2px solid #00f3ff;border-radius:16px;box-sizing:border-box;box-shadow:0 0 0 9999px rgba(0,0,0,.42);';
+
+          const help = document.createElement('div');
+          help.textContent = 'Apunta al codigo de barras dentro del recuadro';
+          help.style.cssText = 'position:absolute;left:24px;right:24px;bottom:36px;color:rgba(255,255,255,.78);font-family:Segoe UI,Roboto,sans-serif;font-size:13px;text-align:center;';
+
+          const close = document.createElement('button');
+          close.textContent = '×';
+          close.style.cssText = 'position:absolute;top:34px;right:20px;width:44px;height:44px;border:0;border-radius:22px;background:rgba(0,0,0,.45);color:#fff;font-size:34px;line-height:38px;';
+
+          const torch = document.createElement('button');
+          torch.textContent = 'Linterna';
+          torch.style.cssText = 'display:none;position:absolute;top:40px;left:20px;border:1px solid rgba(0,243,255,.45);border-radius:12px;background:rgba(0,243,255,.16);color:#00f3ff;padding:10px 14px;font-family:Segoe UI,Roboto,sans-serif;font-weight:700;';
+
+          overlay.append(video, frame, help, close, torch);
+          document.body.appendChild(overlay);
+
+          const stop = (result) => {
+            if (stopped) return;
+            stopped = true;
+            video.pause();
+            stream.getTracks().forEach((track) => track.stop());
+            overlay.remove();
+            resolve(result);
+          };
+
+          close.addEventListener('click', () => stop({ status: 'cancelled' }));
+
+          const [track] = stream.getVideoTracks();
+          try {
+            const capabilities = track?.getCapabilities?.() ?? {};
+            if (capabilities.focusMode) {
+              track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+            }
+            if (capabilities.torch) {
+              torch.style.display = 'block';
+              torch.addEventListener('click', () => {
+                torchEnabled = !torchEnabled;
+                torch.textContent = torchEnabled ? 'Linterna ON' : 'Linterna';
+                track.applyConstraints({ advanced: [{ torch: torchEnabled }] }).catch(() => {});
+              });
+            }
+          } catch (_) {}
+
+          try {
+            await video.play();
+          } catch (_) {
+            stop({ status: 'fallback' });
+            return;
+          }
+
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+          const scan = async () => {
+            if (stopped) return;
+            if (!video.videoWidth || !video.videoHeight || pendingDetection) {
+              requestAnimationFrame(scan);
+              return;
+            }
+
+            pendingDetection = true;
+            const sourceWidth = video.videoWidth * 0.9;
+            const sourceHeight = video.videoHeight * 0.34;
+            const sourceX = (video.videoWidth - sourceWidth) / 2;
+            const sourceY = (video.videoHeight - sourceHeight) / 2;
+            canvas.width = Math.round(sourceWidth);
+            canvas.height = Math.round(sourceHeight);
+            ctx.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
+
+            try {
+              const codes = await detector.detect(canvas);
+              pendingDetection = false;
+              const code = codes.find((barcode) => barcode.rawValue?.trim())?.rawValue.trim();
+              if (code) {
+                stop({ status: 'detected', code });
+                return;
+              }
+            } catch (_) {
+              pendingDetection = false;
+              detectionErrors += 1;
+              if (detectionErrors >= 3) {
+                stop({ status: 'fallback' });
+                return;
+              }
+            }
+
+            requestAnimationFrame(scan);
+          };
+
+          requestAnimationFrame(scan);
+        });
+      } catch (_) {
+        return { status: 'fallback' };
+      }
+    };
   </script>
 
 
