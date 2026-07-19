@@ -9,7 +9,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'perlo-v3';
+const CACHE_VERSION = 'perlo-v4';
 const STATIC_CACHE  = `${CACHE_VERSION}-static`;
 const DATA_CACHE    = `${CACHE_VERSION}-data`;
 
@@ -80,6 +80,22 @@ self.addEventListener('fetch', function (event) {
         return caches.match('./offline.html');
       })
     );
+    return;
+  }
+
+  // ── App shell Flutter → Network-First para no ejecutar bundles viejos ──
+  const isSameOrigin = url.origin === self.location.origin;
+  const isAppShellAsset = isSameOrigin && (
+    event.request.destination === 'script' ||
+    event.request.destination === 'style' ||
+    event.request.destination === 'worker' ||
+    url.pathname.endsWith('/manifest.json') ||
+    url.pathname.endsWith('/AssetManifest.json') ||
+    url.pathname.endsWith('/FontManifest.json')
+  );
+
+  if (isAppShellAsset) {
+    event.respondWith(networkFirstWithCache(event.request, STATIC_CACHE));
     return;
   }
 
